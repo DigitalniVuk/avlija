@@ -88,6 +88,39 @@
         </section>
 
         <section class="group">
+          <h2>Lights</h2>
+          <p class="hint" id="lights-hint">
+            The camera re-settles for a few seconds after each change.
+          </p>
+          <div class="switch-row">
+            <label class="switch">
+              <input type="checkbox" id="spotlight" />
+              <span>Spotlight</span>
+            </label>
+            <label class="switch">
+              <input type="checkbox" id="nightvision" />
+              <span>Force night vision</span>
+            </label>
+          </div>
+          <label class="field slider">
+            <span>Motion light duration <b id="motion-value">&mdash;</b></span>
+            <input type="range" id="motion" min="0" max="300" step="5" value="60" />
+          </label>
+        </section>
+
+        <section class="group">
+          <h2>Talk-back</h2>
+          <p class="hint">
+            Hold to speak to the camera's speaker. Requires a secure context
+            (https or localhost) for microphone access.
+          </p>
+          <button class="btn talk" id="talk">Hold to talk</button>
+          <div class="row">
+            <button class="btn" id="talk-stop">End session</button>
+          </div>
+        </section>
+
+        <section class="group">
           <h2>Presets</h2>
           <div class="presets" id="presets"></div>
         </section>

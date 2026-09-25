@@ -33,6 +33,14 @@ export const MsgId = {
   MonitorReply: 1414,
   Snapshot: 1560,
   Photo: 1600,
+  /** Two-way audio (talk-back). */
+  TalkStart: 1430,
+  /** Client -> camera audio. */
+  TalkData: 1432,
+  /** Camera -> client audio, i.e. the microphone. */
+  TalkDataFromCamera: 1433,
+  TalkClaim: 1434,
+  TalkClaimReply: 1435,
 } as const;
 
 /**
@@ -159,6 +167,15 @@ export class DvripClient {
   private buffer: Buffer = Buffer.alloc(0);
   private sequence = 1;
   private readonly pending = new Map<number, Pending>();
+  private unsolicited: ((msg: DvripMessage) => void) | null = null;
+  /**
+   * DVRIP is request/response over a single socket, and replies are
+   * distinguished only by message id. Two concurrent requests for the same
+   * message id would therefore collide in `pending` and one reply would be
+   * dropped — which is exactly what happened when three config reads were
+   * issued in parallel. Requests are serialised instead.
+   */
+  private requestChain: Promise<unknown> = Promise.resolve();
   private closed = false;
 
   constructor(opts: DvripClientOptions) {
@@ -232,6 +249,9 @@ export class DvripClient {
         this.pending.delete(header.msgId);
         clearTimeout(entry.timer);
         entry.resolve(msg);
+      } else {
+        // A talk session streams microphone audio that no request asked for.
+        this.unsolicited?.(msg);
       }
     }
   }
@@ -244,18 +264,24 @@ export class DvripClient {
    * explicit rather than inferred.
    */
   request(msgId: number, body: Json, expectMsgId: number, sessionId = 0): Promise<DvripMessage> {
-    if (!this.socket || this.socket.destroyed) {
-      return Promise.reject(new DvripError('not connected'));
-    }
-    const seq = (this.sequence = (this.sequence + 1) >>> 0);
-    this.socket.write(encodeHeader(msgId, encodePayload(body), sessionId, seq));
-    return new Promise<DvripMessage>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(expectMsgId);
-        reject(new DvripError(`timeout waiting for msgid ${expectMsgId} (sent ${msgId})`));
-      }, this.timeoutMs);
-      this.pending.set(expectMsgId, { resolve, reject, timer });
-    });
+    const run = (): Promise<DvripMessage> => {
+      if (!this.socket || this.socket.destroyed) {
+        return Promise.reject(new DvripError('not connected'));
+      }
+      const seq = (this.sequence = (this.sequence + 1) >>> 0);
+      this.socket.write(encodeHeader(msgId, encodePayload(body), sessionId, seq));
+      return new Promise<DvripMessage>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          this.pending.delete(expectMsgId);
+          reject(new DvripError(`timeout waiting for msgid ${expectMsgId} (sent ${msgId})`));
+        }, this.timeoutMs);
+        this.pending.set(expectMsgId, { resolve, reject, timer });
+      });
+    };
+    // Chain onto the queue so only one request is in flight at a time.
+    const result = this.requestChain.then(run, run);
+    this.requestChain = result.catch(() => undefined);
+    return result;
   }
 
   /** Fire-and-forget send, used for the periodic keepalive. */
@@ -263,6 +289,24 @@ export class DvripClient {
     if (!this.socket || this.socket.destroyed) return;
     const seq = (this.sequence = (this.sequence + 1) >>> 0);
     this.socket.write(encodeHeader(msgId, encodePayload(body), sessionId, seq));
+  }
+
+  /**
+   * Handle messages that arrive without a matching request — notably the
+   * camera's microphone stream (msgid 1433) during talk-back.
+   */
+  onUnsolicited(handler: (msg: DvripMessage) => void): void {
+    this.unsolicited = handler;
+  }
+
+  /** Write a pre-built DVRIP frame, for the binary talk-audio payload. */
+  writeRaw(frame: Buffer): void {
+    this.socket?.write(frame);
+  }
+
+  /** Sequence numbers must advance monotonically across a talk session. */
+  nextSequence(): number {
+    return (this.sequence = (this.sequence + 1) >>> 0);
   }
 
   close(): void {

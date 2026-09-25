@@ -329,3 +329,46 @@ input[type="range"] {
   font-family: ui-monospace, monospace;
   overflow-wrap: anywhere;
 }
+
+.switch-row {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.switch {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.switch input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.switch input:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn.talk {
+  width: 100%;
+  padding: 14px 0;
+  font-weight: 600;
+  background: #21262d;
+  border: 1px solid var(--border);
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.btn.talk.active {
+  background: var(--ok);
+  border-color: var(--ok);
+  color: #04160a;
+}

@@ -13,6 +13,8 @@
 import { DvripSession, PtzCommand, type DeviceInfo, type PtzMove } from './session.js';
 import { sofiaHash } from './dvrip.js';
 import { OnvifClient } from './onvif.js';
+import { Lights, type LightsState } from './lights.js';
+import { TalkSession, type TalkAudioFrame } from './talk.js';
 
 export interface CameraConfig {
   id: string;
@@ -63,6 +65,10 @@ export class Camera {
   readonly config: CameraConfig;
   readonly dvrip: DvripSession;
   readonly onvif: OnvifClient;
+  /** Spotlight, IR illuminator and IR-cut filter. */
+  readonly lights: Lights;
+  private talk: TalkSession | null = null;
+  private micHandler: ((frame: TalkAudioFrame) => void) | null = null;
 
   private device: DeviceInfo | null = null;
   private lastError: string | null = null;
@@ -78,6 +84,61 @@ export class Camera {
       config.dvripPort ?? 34567,
     );
     this.onvif = new OnvifClient(config.host, config.onvifPort ?? 8899);
+    this.lights = new Lights(this.dvrip);
+  }
+
+  /** Current state of every controllable light. */
+  lightsState(): Promise<LightsState> {
+    return this.lights.read();
+  }
+
+  setSpotlight(on: boolean): Promise<void> {
+    return this.lights.setSpotlight(on);
+  }
+
+  setNightVision(on: boolean): Promise<void> {
+    return this.lights.setNightVision(on);
+  }
+
+  /**
+   * Open the intercom so audio can be streamed to the speaker.
+   *
+   * Held open for the life of the push-to-talk session: claiming it costs a
+   * DVRIP connection and the camera releases the intercom only when told to
+   * stop, so keeping one session avoids churn against the connection cap.
+   */
+  async openTalk(): Promise<void> {
+    if (this.talk?.isOpen) return;
+    this.talk?.close().catch(() => undefined);
+    this.talk = new TalkSession({
+      host: this.config.host,
+      port: this.config.dvripPort ?? 34567,
+      username: this.config.username,
+      password: this.config.password,
+    });
+    await this.talk.open();
+  }
+
+  sendTalkAudio(chunk: Buffer): void {
+    this.talk?.sendAudio(chunk);
+  }
+
+  async closeTalk(): Promise<void> {
+    const talk = this.talk;
+    this.talk = null;
+    if (talk) await talk.close().catch(() => undefined);
+  }
+
+  /**
+   * Route the camera's microphone frames to a handler. Applies immediately if a
+   * talk session is already open, so a listener can attach after the fact.
+   */
+  onMicrophone(
+    handler: ((frame: TalkAudioFrame) => void) | null,
+  ): void {
+    if (handler) this.micHandler = handler;
+    else this.talk?.onMicrophone(() => undefined);
+    if (this.talk?.isOpen) this.talk.onMicrophone((f) => this.micHandler?.(f));
   }
 
   get id(): string {
@@ -207,6 +268,8 @@ export class Camera {
   }
 
   close(): void {
+    this.talk?.close().catch(() => undefined);
+    this.talk = null;
     this.dvrip.close();
   }
 }

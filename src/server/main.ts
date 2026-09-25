@@ -7,6 +7,7 @@
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { WebSocketServer, type WebSocket } from 'ws';
 import { readFile, stat } from 'node:fs/promises';
 import { extname, join, normalize, resolve } from 'node:path';
 import { Camera, type PtzMove } from '../camera/camera.js';
@@ -87,6 +88,43 @@ export async function startServer(): Promise<void> {
       if (!res.headersSent) json(res, 500, { error: message });
       else res.end();
     });
+  });
+
+  // Binary G.711 uplink for talk-back. Kept on the same HTTP server so the
+  // browser only ever needs one origin.
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 1 << 20 });
+  server.on('upgrade', (req, socket, head) => {
+    const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+    if (url.pathname !== '/api/talk/audio') {
+      socket.destroy();
+      return;
+    }
+    const cam = cameras.get(url.searchParams.get('camera') ?? '');
+    if (!cam) {
+      socket.destroy();
+      return;
+    }
+    wss.handleUpgrade(req, socket, head, (ws: WebSocket) => {
+      wss.emit('connection', ws, req, cam);
+    });
+  });
+  wss.on('connection', (ws: WebSocket, _req: IncomingMessage, cam: Camera) => {
+    ws.binaryType = 'nodebuffer';
+    let sessionError: string | null = null;
+    void cam.openTalk().catch((err: unknown) => {
+      sessionError = err instanceof Error ? err.message : String(err);
+    });
+    ws.on('message', (data: Buffer) => {
+      if (sessionError) return;
+      // Each frame is one 320-byte G.711 chunk (40 ms at 8 kHz).
+      if (data.length < 320) return;
+      try {
+        cam.sendTalkAudio(data);
+      } catch {
+        /* the talk session closed under us; stop pushing audio */
+      }
+    });
+    ws.on('close', () => void cam.closeTalk().catch(() => undefined));
   });
 
   await new Promise<void>((done) => server.listen(config.server.port, config.server.host, done));
@@ -296,6 +334,66 @@ async function handle(req: IncomingMessage, res: ServerResponse, api: JsonApi): 
       return;
     }
     json(res, 200, { ok: true, action: body.action, preset });
+    return;
+  }
+
+  // ---- lights: spotlight, IR illuminator, IR-cut ------------------------
+  if (path === '/api/lights' && req.method === 'GET') {
+    const cam = getCamera(api, req, res);
+    if (!cam) return;
+    json(res, 200, await cam.lightsState());
+    return;
+  }
+
+  if (path === '/api/lights' && req.method === 'POST') {
+    const cam = getCamera(api, req, res);
+    if (!cam) return;
+    const body = (await readBody(req)) as {
+      spotlight?: boolean;
+      nightVision?: boolean;
+      irCutFilter?: boolean;
+      motionDurationSec?: number;
+    };
+    if (typeof body.spotlight === 'boolean') await cam.setSpotlight(body.spotlight);
+    if (typeof body.nightVision === 'boolean') await cam.setNightVision(body.nightVision);
+    if (typeof body.irCutFilter === 'boolean') {
+      await cam.lights.setIrCutFilter(body.irCutFilter);
+    }
+    if (typeof body.motionDurationSec === 'number') {
+      await cam.lights.setMotionDuration(body.motionDurationSec);
+    }
+    // The camera needs several seconds to re-settle after the IR-cut relay and
+    // auto-exposure respond, so the response reflects intent, not a settled
+    // image. The client polls /api/lights if it needs the observed state.
+    json(res, 200, await cam.lightsState());
+    return;
+  }
+
+  // ---- talk-back audio stream (binary G.711) ----------------------------
+  if (path === '/api/talk/audio' && req.method === 'GET') {
+    const cam = getCamera(api, req, res);
+    if (!cam) return;
+    // The WebSocket upgrade is handled by the upgrade handler below; if we are
+    // still in the HTTP path the client did not upgrade.
+    json(res, 426, { error: 'this endpoint requires a WebSocket upgrade' });
+    return;
+  }
+
+  if (path === '/api/talk' && req.method === 'POST') {
+    const cam = getCamera(api, req, res);
+    if (!cam) return;
+    const body = (await readBody(req)) as { phase?: string };
+    if (body.phase === 'start') {
+      await cam.openTalk();
+      json(res, 200, { ok: true, talking: true });
+      return;
+    }
+    if (body.phase === 'stop') {
+      await cam.closeTalk();
+      json(res, 200, { ok: true, talking: false });
+      return;
+    }
+    json(res, 400, { error: 'phase must be "start" or "stop"' });
     return;
   }
 

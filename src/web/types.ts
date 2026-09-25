@@ -49,3 +49,17 @@ export interface CameraInfo {
 export interface CamerasResponse {
   cameras: CameraInfo[];
 }
+
+/** Live state of the camera's controllable lights. */
+export interface LightsState {
+  /** true when the white LED is engaged (WorkMode === "Auto"). */
+  spotlightOn: boolean;
+  workMode: string;
+  /** Present in the firmware but measured as inert; do not present as a control. */
+  brightness: number | null;
+  motionDurationSec: number | null;
+  /** true = forced monochrome night vision with the IR illuminator permitted. */
+  nightVision: boolean;
+  irCutFilterIn: boolean;
+  lowLuxMode: number | null;
+}

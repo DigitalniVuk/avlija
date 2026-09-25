@@ -190,8 +190,53 @@ async function run(): Promise<void> {
     });
     record('preset recall reachable', presetResult.includes('preset'), presetResult);
 
+    // ---- lights panel reflects real camera state ------------------------
+    const lights = await page.evaluate(async () => {
+      const res = await fetch('/api/lights?camera=' + (document.getElementById('camera-select') as HTMLSelectElement).value);
+      const state = await res.json();
+      const spot = document.getElementById('spotlight') as HTMLInputElement;
+      const night = document.getElementById('nightvision') as HTMLInputElement;
+      const motion = document.getElementById('motion') as HTMLInputElement;
+      return {
+        api: state,
+        spotlightChecked: spot.checked,
+        nightChecked: night.checked,
+        motionValue: motion.value,
+      };
+    });
+    record(
+      'lights state loads from the camera',
+      typeof lights.api.workMode === 'string',
+      `workMode=${lights.api.workMode} spotlightOn=${lights.api.spotlightOn} nightVision=${lights.api.nightVision}`,
+    );
+    record(
+      'light controls reflect camera state',
+      lights.spotlightChecked === lights.api.spotlightOn && lights.nightChecked === lights.api.nightVision,
+      `spotlight checkbox=${lights.spotlightChecked} night checkbox=${lights.nightChecked}`,
+    );
+
+    // ---- talk-back is wired, and its API validates input ----------------
+    const talkButtonExists = await page.evaluate(
+      () => document.getElementById('talk') !== null,
+    );
+    record('talk-back control present', talkButtonExists === true);
+
+    const talkValidation = await page.evaluate(async () => {
+      const cam = (document.getElementById('camera-select') as HTMLSelectElement).value;
+      const bad = await fetch(`/api/talk?camera=${cam}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phase: 'nonsense' }),
+      });
+      return bad.status;
+    });
+    record('talk endpoint rejects a bad phase', talkValidation === 400, `HTTP ${talkValidation}`);
+
     // ---- no unexpected console errors -----------------------------------
-    const realErrors = consoleErrors.filter((e) => !/favicon|ERR_INTERNET_DISCONNECTED/i.test(e));
+    // The 400 above is produced on purpose by the talk-validation check.
+    const realErrors = consoleErrors.filter(
+      (e) => !/favicon|ERR_INTERNET_DISCONNECTED|status of 400/i.test(e),
+    );
     record('no console errors', realErrors.length === 0, realErrors.slice(0, 3).join(' | '));
   } finally {
     await browser?.close();

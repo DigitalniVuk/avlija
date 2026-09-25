@@ -7,6 +7,7 @@
  */
 
 import type { CameraInfo, CamerasResponse, PtzMove } from './types.js';
+import { wireLights, wireTalk, refreshLights, stopTalking } from './hardware.js';
 
 const $ = <T extends HTMLElement>(id: string): T => {
   const el = document.getElementById(id);
@@ -375,6 +376,12 @@ async function refresh(): Promise<void> {
   if (!target.online && target.error) setOverlay(true, target.error);
 }
 
+/** Notified whenever the selected camera changes, so panels can reload. */
+const cameraChangeHandlers: Array<(id: string) => void> = [];
+function onCameraChange(handler: (id: string) => void): void {
+  cameraChangeHandlers.push(handler);
+}
+
 function wireChrome(): void {
   cameraSelect.addEventListener('change', () => {
     const cam = cameras.find((c) => c.id === cameraSelect.value);
@@ -384,6 +391,7 @@ function wireChrome(): void {
     applyCapabilities(cam);
     stopView();
     setOverlay(true, 'Press Connect', false);
+    for (const handler of cameraChangeHandlers) handler(cam.id);
   });
 
   sourceSelect.addEventListener('change', () => void startView());
@@ -435,6 +443,8 @@ async function main(): Promise<void> {
   wireDpad();
   wirePresets();
   wireChrome();
+  wireLights(onCameraChange);
+  wireTalk();
   applyZoom(1);
   setOverlay(true, 'Loading…', true);
   try {
@@ -449,6 +459,9 @@ async function main(): Promise<void> {
 
   // Device identity can change (reboot, DHCP); refresh quietly.
   window.setInterval(() => void refresh().catch(() => undefined), 30_000);
+
+  if (currentCamera) void refreshLights(currentCamera.id).catch(() => undefined);
+  window.addEventListener('pagehide', () => void stopTalking());
 }
 
 void main();

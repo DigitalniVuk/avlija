@@ -17,7 +17,8 @@
     "probe": "tsx tools/probe.ts",
     "ptz:verify": "tsx tools/ptz-verify.ts",
     "test:e2e": "tsx tools/e2e.ts",
-    "test": "npm run typecheck && npm run build && npm run test:e2e"
+    "test": "npm run typecheck && npm run build && npm run test:e2e",
+    "hw:verify": "tsx tools/verify-hardware.ts"
   },
   "dependencies": {
     "ws": "^8.18.0"

@@ -243,6 +243,24 @@ export class DvripSession {
     return (body[name] ?? null) as T | null;
   }
 
+  /**
+   * Write a configuration block (msgid 1040).
+   *
+   * Two shapes matter and the read tells you which to use: blocks that read
+   * back as a single-element array (per channel) are written using the
+   * `Name.[0]` spelling with an object value; blocks that read back as a plain
+   * object use the bare name with an object value.
+   *
+   * Payloads are merged, not replaced, so a partial update leaves other fields
+   * alone. `Ret: 100` still only means "accepted" — this firmware stores
+   * arbitrary values without validating them, so callers that need proof must
+   * re-read *and* verify the physical effect.
+   */
+  async setConfig(name: string, value: unknown): Promise<number> {
+    const body = await this.command(MsgId.ConfigSet, MsgId.ConfigSetReply, name, value);
+    return DvripSession.ret(body);
+  }
+
   async getSystemFunction(): Promise<Json | null> {
     const body = await this.command(MsgId.SystemFunction, MsgId.SystemFunctionReply, 'SystemFunction');
     if (DvripSession.ret(body) !== Ret.Ok) return null;

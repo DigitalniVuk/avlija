@@ -6,6 +6,8 @@ require the vendor's iCSee phone app or a Windows-only ActiveX plugin.
 - **Live view** over WebRTC, ~200 ms latency, native H.264 with no transcoding
 - **Pan & tilt** control, plus presets
 - **Digital zoom** in the browser (this camera class has no zoom motor)
+- **Spotlight** control, and forced night vision
+- **Two-way audio** — talk to the camera, and hear it back
 - Works with any camera running **XiongMai / XM ("icsee", NETSurveillance)** firmware
 
 Everything here was reverse-engineered and **verified against real hardware**
@@ -175,6 +177,37 @@ logic.
 
 ---
 
+## Lights, microphone and speaker
+
+| Feature | How it is controlled | Status |
+|---|---|---|
+| Spotlight | `Camera.WhiteLight.WorkMode` = `Auto` / `Close` | verified working |
+| Spotlight brightness | `Camera.WhiteLight.Brightness` | schema exists but is **inert**; not exposed |
+| Motion light duration | `MoveTrigLight.Duration` | verified |
+| Speaker | DVRIP msgid 1432, G.711 A-law, 320-byte chunks | verified working |
+| Microphone | DVRIP msgid 1433, G.711 A-law, 8 kHz | verified working |
+| IR illuminator | automatic, via the photosensor | verified emitting in darkness |
+| Night vision (forced) | `Camera.Param.[0].InfraredSwap` | **unverified** — see below |
+
+Two-way audio was proven by a loopback test rather than by ear: the verifier
+sends a 1 kHz tone to the speaker and recovers that exact frequency from the
+camera's microphone stream, using a Goertzel filter and a before/during/after
+control in the same capture. Tone energy came back **2.2 × 10⁹ times** the
+pre-tone baseline.
+
+The night-vision mapping is deliberately reported as unverified. `InfraredSwap`
+visibly changes the image, but it produced *opposite* results in a dark room
+versus a lit one because the camera's auto day/night logic overrides it. The
+API reports what was requested rather than what was achieved, and the verifier
+marks the check advisory instead of pretending to a verdict.
+
+Full detail, including every measurement and the traps involved, is in
+[`docs/HARDWARE.md`](docs/HARDWARE.md).
+
+```bash
+npm run hw:verify -- --camera cam1    # proves each of the above
+```
+
 ## Testing
 
 ```bash
@@ -203,6 +236,10 @@ The suite is checked against the pre-fix build to confirm it fails there.
 | `POST` | `/api/ptz?camera=<id>` | single step — `{command, step}` |
 | `POST` | `/api/ptz/hold?camera=<id>` | press-and-hold — `{command, phase:"start"\|"stop"}` |
 | `POST` | `/api/presets?camera=<id>` | `{action:"goto"\|"set", preset:0-255}` |
+| `GET` | `/api/lights?camera=<id>` | spotlight / night-vision state |
+| `POST` | `/api/lights?camera=<id>` | `{spotlight, nightVision, motionDurationSec}` |
+| `POST` | `/api/talk?camera=<id>` | `{phase:"start"\|"stop"}` — intercom |
+| `WS` | `/api/talk/audio?camera=<id>` | binary G.711 A-law uplink to the speaker |
 | `POST` | `/api/whep?src=<stream>` | WebRTC signalling proxy |
 | `GET` | `/api/go2rtc/logs` | media engine diagnostics |
 
@@ -217,6 +254,19 @@ client does; the browser additionally stops on `blur`, `visibilitychange` and
 `pagehide`.
 
 ---
+
+## Talk-back limitations
+
+The camera's speaker input is the weak link. Measured: handing over 5.0 s of
+audio took **42.9 s** of wall clock, because the camera stops draining the socket
+once its own buffer fills. Consequences, and what the app does about them:
+
+- Outgoing audio is treated as a **drain, not a queue** — chunks are dropped
+  rather than buffered, since buffering would convert backpressure into
+  ever-growing latency.
+- Talk-back is therefore much better suited to short intercom bursts than to
+  sustained conversation, and is exposed as push-to-talk.
+- The microphone stream (msgid 1433) is unaffected; it flows camera → client.
 
 ## Licence
 

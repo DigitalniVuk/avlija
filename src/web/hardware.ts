@@ -28,21 +28,30 @@ const nightvision = $<HTMLInputElement>('nightvision');
 const motion = $<HTMLInputElement>('motion');
 const motionValue = $<HTMLElement>('motion-value');
 const talkBtn = $<HTMLButtonElement>('talk');
-const talkStop = $<HTMLButtonElement>('talk');
+const talkStop = $<HTMLButtonElement>('talk-stop');
+const talkStatus = $<HTMLParagraphElement>('talk-status');
+const talkBaseLabel = 'Hold to talk';
+
+/** Surface the last action so the UI never looks unresponsive. */
+function setTalkStatus(text: string, kind: 'idle' | 'busy' | 'error' = 'idle'): void {
+  talkStatus.textContent = text;
+  talkStatus.dataset.kind = kind;
+}
 
 let currentCameraId: string | null = null;
 let talking = false;
 let audioContext: AudioContext | null = null;
 let mediaStream: MediaStream | null = null;
 let audioSource: MediaStreamAudioSourceNode | null = null;
-let workletReady = false;
+let workletReady: Promise<void> | null = null;
 let talkSocket: WebSocket | null = null;
 let talkNode: AudioWorkletNode | null = null;
 
 /** G.711 A-law encoder in the browser, matching the camera's expected format. */
-function installAlawWorklet(ctx: AudioContext): void {
-  if (workletReady) return;
-  workletReady = true;
+function installAlawWorklet(ctx: AudioContext): Promise<void> {
+  // Must be awaited: constructing the AudioWorkletNode before the module has
+  // loaded throws, which previously aborted the whole talk session.
+  if (workletReady) return workletReady;
   const blob = `
     class AlawEncoder extends AudioWorkletProcessor {
       process(inputs) {
@@ -70,7 +79,8 @@ function installAlawWorklet(ctx: AudioContext): void {
     registerProcessor('alaw-encoder', AlawEncoder);
   `;
   const url = URL.createObjectURL(new Blob([blob], { type: 'application/javascript' }));
-  void ctx.audioWorklet.addModule(url);
+  workletReady = ctx.audioWorklet.addModule(url).then(() => undefined);
+  return workletReady;
 }
 
 // ------------------------------------------------------------------ lights
@@ -150,21 +160,30 @@ async function postTalk(phase: 'start' | 'stop'): Promise<void> {
 function setTalking(active: boolean): void {
   talking = active;
   talkBtn.classList.toggle('active', active);
-  talkBtn.textContent = active ? 'Speaking…' : 'Hold to talk';
+  talkBtn.textContent = active ? 'Speaking…' : talkBaseLabel;
+  talkStop.disabled = !active;
 }
 
 async function startTalking(): Promise<void> {
   if (talking || !currentCameraId) return;
+  setTalkStatus('Requesting microphone…', 'busy');
   if (!window.isSecureContext) {
-    talkBtn.textContent = 'Needs https or localhost';
+    setTalkStatus(
+      'Microphone needs a secure context — use http://localhost:5173, not the LAN address.',
+      'error',
+    );
+    return;
+  }
+  if (!navigator.mediaDevices?.getUserMedia) {
+    setTalkStatus('This browser exposes no microphone API.', 'error');
     return;
   }
   try {
     mediaStream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true, noiseSuppression: true },
     });
-  } catch (err) {
-    talkBtn.textContent = 'Microphone denied';
+  } catch {
+    setTalkStatus('Microphone permission denied by the browser.', 'error');
     return;
   }
   try {
@@ -185,13 +204,17 @@ async function startTalking(): Promise<void> {
     };
     audioSource.connect(talkNode);
     setTalking(true);
-  } catch {
+    talkStop.disabled = false;
+    setTalkStatus('Intercom open — hold to speak.', 'idle');
+  } catch (err) {
+    setTalkStatus(`Could not start talk-back: ${(err as Error).message}`, 'error');
     await teardown();
   }
 }
 
 async function teardown(): Promise<void> {
   setTalking(false);
+  setTalkStatus('');
   talkNode?.disconnect();
   talkNode = null;
   audioSource?.disconnect();
@@ -224,6 +247,11 @@ export function wireTalk(): void {
   talkBtn.addEventListener('pointerdown', (e) => {
     e.preventDefault();
     void startTalking();
+  });
+  // Releasing stops the tone; the intercom itself stays open until "End session"
+  // or the page goes away, because claiming it costs a DVRIP connection.
+  talkBtn.addEventListener('pointerup', () => {
+    if (talkSocket) setTalkStatus('Released — hold again to speak.');
   });
   talkStop.addEventListener('click', () => void teardown());
   // Never leave the intercom open if the page goes away.

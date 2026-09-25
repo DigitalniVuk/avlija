@@ -382,6 +382,11 @@ function onCameraChange(handler: (id: string) => void): void {
   cameraChangeHandlers.push(handler);
 }
 
+/** Tell every panel which camera is current. Called on load and on change. */
+function notifyCameraChanged(id: string): void {
+  for (const handler of cameraChangeHandlers) handler(id);
+}
+
 function wireChrome(): void {
   cameraSelect.addEventListener('change', () => {
     const cam = cameras.find((c) => c.id === cameraSelect.value);
@@ -391,7 +396,7 @@ function wireChrome(): void {
     applyCapabilities(cam);
     stopView();
     setOverlay(true, 'Press Connect', false);
-    for (const handler of cameraChangeHandlers) handler(cam.id);
+    notifyCameraChanged(cam.id);
   });
 
   sourceSelect.addEventListener('change', () => void startView());
@@ -460,7 +465,9 @@ async function main(): Promise<void> {
   // Device identity can change (reboot, DHCP); refresh quietly.
   window.setInterval(() => void refresh().catch(() => undefined), 30_000);
 
-  if (currentCamera) void refreshLights(currentCamera.id).catch(() => undefined);
+  // Panels learn the current camera on load as well as on change; without this
+  // they never learn it at all and their writes are silently dropped.
+  if (currentCamera) notifyCameraChanged(currentCamera.id);
   window.addEventListener('pagehide', () => void stopTalking());
 }
 

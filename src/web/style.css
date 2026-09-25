@@ -372,3 +372,18 @@ input[type="range"] {
   border-color: var(--ok);
   color: #04160a;
 }
+
+.talk-status {
+  margin: 8px 0 0;
+  min-height: 1.4em;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.talk-status[data-kind='busy'] {
+  color: var(--warn);
+}
+
+.talk-status[data-kind='error'] {
+  color: var(--err);
+}

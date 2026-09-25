@@ -73,7 +73,11 @@ async function run(): Promise<void> {
       args: [
         // Autoplay + no user gesture; the page is otherwise identical.
         '--autoplay-policy=no-user-gesture-required',
+        // Synthetic microphone, auto-granted, so the talk-back path is
+        // exercised end to end without a real device or a permission prompt.
         '--use-fake-ui-for-media-stream',
+        '--use-fake-device-for-media-stream',
+        '--autoplay-policy=no-user-gesture-required',
       ],
     });
     const page = await browser.newPage();
@@ -214,6 +218,85 @@ async function run(): Promise<void> {
       lights.spotlightChecked === lights.api.spotlightOn && lights.nightChecked === lights.api.nightVision,
       `spotlight checkbox=${lights.spotlightChecked} night checkbox=${lights.nightChecked}`,
     );
+
+    // ---- clicking the spotlight switch actually reaches the camera ------
+    // This is the regression guard for a bug where the panel never learned the
+    // current camera id, so every write was silently discarded client-side.
+    const spotlightToggle = await page.evaluate(async () => {
+      const cam = (document.getElementById('camera-select') as HTMLSelectElement).value;
+      const box = document.getElementById('spotlight') as HTMLInputElement;
+      const before = box.checked;
+      const stateBefore = await (await fetch(`/api/lights?camera=${cam}`)).json();
+      box.click();
+      await new Promise((r) => setTimeout(r, 1500));
+      const stateAfter = await (await fetch(`/api/lights?camera=${cam}`)).json();
+      // Put it back the way we found it.
+      box.click();
+      await new Promise((r) => setTimeout(r, 1200));
+      const stateRestored = await (await fetch(`/api/lights?camera=${cam}`)).json();
+      return { before, after: box.checked, stateBefore, stateAfter, stateRestored };
+    });
+    record(
+      'spotlight toggle reaches the camera',
+      spotlightToggle.stateAfter.workMode !== spotlightToggle.stateBefore.workMode,
+      `${spotlightToggle.stateBefore.workMode} -> ${spotlightToggle.stateAfter.workMode}`,
+    );
+    record(
+      'spotlight toggle is reversible',
+      spotlightToggle.stateRestored.workMode === spotlightToggle.stateBefore.workMode,
+      `restored to ${spotlightToggle.stateRestored.workMode}`,
+    );
+
+    // ---- talk-back really opens an intercom and streams audio -----------
+    // Guards the three bugs that made hold-to-talk a no-op: the panel never
+    // learned the camera id, #talk-stop resolved to #talk, and the AudioWorklet
+    // module was loaded without being awaited.
+    const talk = await page.evaluate(async () => {
+      const btn = document.getElementById('talk') as HTMLButtonElement;
+      const status = document.getElementById('talk-status') as HTMLElement;
+      const out: Record<string, unknown> = { secureContext: window.isSecureContext };
+      const cam = (document.getElementById('camera-select') as HTMLSelectElement).value;
+      const opened = new Promise<boolean>((resolve) => {
+        // The WebSocket is opened as soon as the intercom is up.
+        const original = window.WebSocket;
+        (window as unknown as { WebSocket: typeof WebSocket }).WebSocket = class extends original {
+          constructor(url: string | URL, protocols?: string | string[]) {
+            super(url, protocols);
+            if (String(url).includes('/api/talk/audio')) {
+              this.addEventListener('open', () => resolve(true));
+              this.addEventListener('error', () => resolve(false));
+              setTimeout(() => resolve(false), 8000);
+            }
+          }
+        } as typeof WebSocket;
+      });
+
+      btn.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 1 }));
+      out.socketOpened = await opened;
+      await new Promise((r) => setTimeout(r, 1500));
+      out.status = status.textContent;
+      out.btnLabel = btn.textContent;
+      out.active = btn.classList.contains('active');
+      out.stopEnabled = !(document.getElementById('talk-stop') as HTMLButtonElement).disabled;
+      out.talking = (await (await fetch(`/api/talk?camera=${cam}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phase: 'start' }),
+      })).json()).talking;
+      return out;
+    });
+    record(
+      'talk-back opens an audio socket to the camera',
+      talk.socketOpened === true,
+      `secureContext=${talk.secureContext}`,
+    );
+    record(
+      'talk-back reports its state in the UI',
+      typeof talk.status === 'string' && talk.status.length > 0 && talk.active === true,
+      `"${talk.status}" label="${talk.btnLabel}"`,
+    );
+    record('end-session button enables while talking', talk.stopEnabled === true);
+    record('server reports the intercom open', talk.talking === true);
 
     // ---- talk-back is wired, and its API validates input ----------------
     const talkButtonExists = await page.evaluate(

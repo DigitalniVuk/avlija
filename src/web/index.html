@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Avlija</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="dot" id="status-dot" title="status"></span>
+        <h1>Avlija</h1>
+      </div>
+      <div class="topbar-controls">
+        <label class="field">
+          <span>Camera</span>
+          <select id="camera-select"></select>
+        </label>
+        <label class="field">
+          <span>Source</span>
+          <select id="source-select">
+            <option value="dvrip">DVRIP (native)</option>
+            <option value="rtsp">RTSP</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Stream</span>
+          <select id="stream-select">
+            <option value="0">Main</option>
+            <option value="1">Sub</option>
+          </select>
+        </label>
+        <button id="connect-btn" class="btn primary">Connect</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="stage">
+        <div class="viewport" id="viewport">
+          <video id="video" autoplay playsinline muted></video>
+          <div class="overlay" id="overlay">
+            <div class="overlay-inner">
+              <div class="spinner" id="spinner"></div>
+              <p id="overlay-text">Not connected</p>
+            </div>
+          </div>
+          <div class="hud" id="hud"></div>
+          <div class="zoom-badge" id="zoom-badge" hidden>Digital zoom 1.0&times;</div>
+        </div>
+      </section>
+
+      <aside class="panel">
+        <section class="group">
+          <h2>Pan &amp; tilt</h2>
+          <p class="hint">Press and hold a direction, or click for a single step.</p>
+          <div class="dpad" id="dpad">
+            <button class="dbtn" data-move="leftUp" aria-label="Up-left">&#9650;&nbsp;&#9654;</button>
+            <button class="dbtn" data-move="up" aria-label="Up">&#9650;</button>
+            <button class="dbtn" data-move="rightUp" aria-label="Up-right">&#9654;&nbsp;&#9650;</button>
+            <button class="dbtn" data-move="left" aria-label="Left">&#9664;</button>
+            <div class="dpad-center" aria-hidden="true"></div>
+            <button class="dbtn" data-move="right" aria-label="Right">&#9654;</button>
+            <button class="dbtn" data-move="leftDown" aria-label="Down-left">&#9664;&nbsp;&#9660;</button>
+            <button class="dbtn" data-move="down" aria-label="Down">&#9660;</button>
+            <button class="dbtn" data-move="rightDown" aria-label="Down-right">&#9654;&nbsp;&#9660;</button>
+          </div>
+          <label class="field slider">
+            <span>Speed <b id="step-value">4</b></span>
+            <input type="range" id="step" min="1" max="8" step="1" value="4" />
+          </label>
+        </section>
+
+        <section class="group">
+          <h2>Zoom</h2>
+          <p class="hint" id="zoom-hint">
+            This camera's lens has no zoom motor, so zoom is applied digitally in the browser.
+          </p>
+          <label class="field slider">
+            <span>Digital zoom <b id="zoom-value">1.0&times;</b></span>
+            <input type="range" id="zoom" min="1" max="6" step="0.1" value="1" />
+          </label>
+          <div class="row">
+            <button class="btn" id="zoom-out">&minus;</button>
+            <button class="btn" id="zoom-reset">Reset</button>
+            <button class="btn" id="zoom-in">+</button>
+          </div>
+        </section>
+
+        <section class="group">
+          <h2>Presets</h2>
+          <div class="presets" id="presets"></div>
+        </section>
+
+        <section class="group">
+          <h2>Device</h2>
+          <dl class="facts" id="facts"></dl>
+        </section>
+      </aside>
+    </main>
+
+    <script type="module" src="/main.js"></script>
+  </body>
+</html>

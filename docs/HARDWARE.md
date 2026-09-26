@@ -254,24 +254,71 @@ direction camera→client. `SystemInfo` reports three separate channels:
 `AudioInChannel: 1` (mic), `TalkInChannel: 1`, `TalkOutChannel: 1`. Talk-back
 is the opposite direction and does not appear in the SDP as a writable track.
 
-### Production constraint: severe backpressure
+### Production constraints
 
-Sending 125 chunks (5.0 s of audio) took **42.9 s** of wall clock. The camera
-stops draining the socket once its own buffer is full, so `sendall` blocks and
-realtime audio is stretched by roughly 8×. Practical consequences:
+**Frame size is not negotiable.** The uplink must be exactly 320 bytes
+(40 ms of G.711 at 8 kHz). A Web Audio `AudioWorkletProcessor.process()` call
+yields one **128-sample quantum**, so posting each quantum produced 128-byte
+messages that the receiver discarded — the microphone was captured and thrown
+away while the UI cheerfully reported "transmitting". The worklet now buffers to
+320 bytes before posting, and the server re-frames defensively.
 
-- Never assume a write completes promptly.
-- Queue outgoing audio with a cap and **drop stale chunks** rather than
-  accumulating latency.
-- Keep the read path draining — the microphone stream arrives unprompted and a
-  writer that ignores it will stall.
+**The worklet needs an output path.** An `AudioWorkletNode` with no outgoing
+connection is not guaranteed to be pulled by the audio rendering thread, so
+`process()` may never run. It is routed through a zero-gain node to the
+destination, which keeps the graph alive silently.
+
+**The module load must be awaited.** Constructing the node before
+`addModule()` resolves throws, and the failure tears down the session.
+
+**Backpressure: resolved by correct framing.** With 128-byte frames the camera
+stalled badly — 5.0 s of audio took **42.9 s**. With correct 320-byte framing it
+streams at true realtime, measured at 25 frames/s × 320 B = 8000 B/s exactly.
+The earlier "camera is very slow" conclusion was an artefact of the frame size.
+Keep the read path draining regardless: the microphone stream arrives
+unprompted and a writer that ignores it will stall.
 
 UDP 34568 is advertised in `NetWork.NetCommon` but is not usable for talk: the
 claim/start handshake is inherently request/response.
 
 ---
 
-## 5. Reproducing all of this
+## 5. Verifying the whole round trip through the UI
+
+`tools/verify-audio-path.ts` drives the **shipped browser code** — getUserMedia,
+the G.711 worklet, the binary WebSocket, the DVRIP uplink and the intercom
+handshake — in headless Chromium with a WAV file substituted for the
+microphone, then recovers that tone from the camera's own microphone stream
+(read back through a server-side capture endpoint).
+
+```bash
+npm run verify:audio
+```
+
+```
+ok  browser reports transmitting — Intercom open — hold to speak.
+ok  browser sent audio to the server — 206 messages, 65920 bytes
+ok  server forwarded 320-byte frames to the camera — 206 frames
+ok  camera is streaming its microphone back — 413 frames
+ok  tone recovered on the camera microphone — 1.8e+9x baseline
+```
+
+65920 / 206 = 320 bytes per frame, exactly as the protocol requires.
+
+The fake-capture file is 4 s of digital silence followed by the tone, so the
+baseline is a measured noise floor rather than a guess about when the tone
+began.
+
+### Debugging aid
+
+`window.__avlijaTalk.lastExit` records which branch `startTalking()` exited
+through — `no-camera-id`, `mic-denied`, `worklet-loaded`, `streaming`, and so
+on. Talk-back can fail several ways that look identical from the UI, so this is
+the first thing to read when it misbehaves.
+
+---
+
+## 6. Reproducing all of this
 
 ```bash
 npm run hw:verify -- --camera cam1              # lights + talk
@@ -286,15 +333,16 @@ For the night-vision mapping, run it with the room dark.
 
 ---
 
-## 6. Summary
+## 7. Summary
 
 | Feature | Control | Status |
 |---|---|---|
 | **Spotlight** | `Camera.WhiteLight.WorkMode` = `Auto` / `Close` | **verified working** |
 | Spotlight brightness | `Camera.WhiteLight.Brightness` | present but **inert** — not exposed |
 | Motion-trigger duration | `Camera.WhiteLight.MoveTrigLight.Duration` | **verified live** via app diff |
-| **Speaker** | DVRIP 1432, G.711 A-law, 320-byte chunks | **verified working** (tone echo) |
+| **Speaker** | DVRIP 1432, G.711 A-law, 320-byte chunks | **verified working** — tone recovered on the mic through the real UI |
 | **Microphone** | DVRIP 1433, G.711 A-law, 8 kHz | **verified working** |
+| Talk-back latency | — | **realtime** (8 kB/s) once frames are 320 B |
 | IR illuminator | automatic via photosensor | **verified emitting** in darkness |
 | Night vision force | `Camera.Param.[0].InfraredSwap` | **unverified** — fights auto day/night, mapping differs by room state |
 | IR-cut filter | `Camera.Param.[0].IrcutSwap` | writable, small colour shift only |

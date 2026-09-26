@@ -384,7 +384,14 @@ function onCameraChange(handler: (id: string) => void): void {
 
 /** Tell every panel which camera is current. Called on load and on change. */
 function notifyCameraChanged(id: string): void {
+  document.body.dataset.cameraId = id;
   for (const handler of cameraChangeHandlers) handler(id);
+  // Set last, and only once every panel has been told. Advertising readiness
+  // earlier left a window in which the page looked initialised while the panels
+  // still had no camera id, so a control could be used before it worked.
+  if (!document.body.dataset.appReady) {
+    document.body.dataset.appReady = 'true';
+  }
 }
 
 function wireChrome(): void {

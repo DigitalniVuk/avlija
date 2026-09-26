@@ -255,18 +255,26 @@ client does; the browser additionally stops on `blur`, `visibilitychange` and
 
 ---
 
-## Talk-back limitations
+## Verifying talk-back
 
-The camera's speaker input is the weak link. Measured: handing over 5.0 s of
-audio took **42.9 s** of wall clock, because the camera stops draining the socket
-once its own buffer fills. Consequences, and what the app does about them:
+```bash
+npm run verify:audio
+```
 
-- Outgoing audio is treated as a **drain, not a queue** — chunks are dropped
-  rather than buffered, since buffering would convert backpressure into
-  ever-growing latency.
-- Talk-back is therefore much better suited to short intercom bursts than to
-  sustained conversation, and is exposed as push-to-talk.
-- The microphone stream (msgid 1433) is unaffected; it flows camera → client.
+This drives the shipped browser code in headless Chromium with a WAV
+substituted for the microphone, then recovers that exact tone from the camera's
+own microphone stream — so it proves the full loop rather than trusting the UI's
+"transmitting" label. See [`docs/HARDWARE.md`](docs/HARDWARE.md).
+
+Two details that are easy to get wrong and produce a silently dead microphone:
+
+- The uplink must be **320-byte frames**. A Web Audio worklet emits 128-sample
+  quanta; posting them raw means the camera receives nothing usable.
+- The worklet needs a path to the audio destination, or the audio thread never
+  calls it.
+
+Both are handled, and both are covered by the verifier. With correct framing the
+stream runs at true realtime (8 kB/s).
 
 ## Licence
 

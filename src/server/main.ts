@@ -8,6 +8,7 @@
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { WebSocketServer, type WebSocket } from 'ws';
+import { TALK_CHUNK_BYTES } from '../camera/talk.js';
 import { readFile, stat } from 'node:fs/promises';
 import { extname, join, normalize, resolve } from 'node:path';
 import { Camera, type PtzMove } from '../camera/camera.js';
@@ -37,6 +38,61 @@ const VALID_MOVES: ReadonlySet<string> = CONTINUOUS_MOVES;
 
 function isValidMove(command: string): command is PtzMove {
   return VALID_MOVES.has(command);
+}
+
+/**
+ * Counters for the talk-back audio path.
+ *
+ * Talk-back failing silently is the worst failure mode: the UI happily says
+ * "transmitting" while nothing reaches the camera. These make each hop
+ * measurable — browser to server, server to camera, and camera microphone
+ * frames coming back.
+ */
+/** G.711 A-law decoder, for the diagnostic capture endpoint. */
+function alawToLinear(b: number): number {
+  const x = b ^ 0x55;
+  const t = (x & 0x0f) << 4;
+  const seg = (x & 0x70) >> 4;
+  let v: number;
+  if (seg === 0) v = t + 8;
+  else if (seg === 1) v = t + 0x108;
+  else v = (t + 0x108) << (seg - 1);
+  if (!(x & 0x80)) v = -v;
+  return Math.max(-32768, Math.min(32767, v));
+}
+
+interface TalkStats {
+  wsMessages: number;
+  wsBytes: number;
+  framesToCamera: number;
+  micFramesFromCamera: number;
+  talkOpen: boolean;
+  lastError: string | null;
+  /**
+   * Ring buffer of the camera's microphone, decoded to signed 16-bit LE.
+   * Exposed for diagnostics so the audio round trip can be verified from the
+   * outside instead of being taken on trust.
+   */
+  capture: Buffer;
+}
+
+const talkStats = new WeakMap<Camera, TalkStats>();
+
+function statsFor(cam: Camera): TalkStats {
+  let s = talkStats.get(cam);
+  if (!s) {
+    s = {
+      wsMessages: 0,
+      wsBytes: 0,
+      framesToCamera: 0,
+      micFramesFromCamera: 0,
+      talkOpen: false,
+      lastError: null,
+      capture: Buffer.alloc(0),
+    };
+    talkStats.set(cam, s);
+  }
+  return s;
 }
 
 interface JsonApi {
@@ -110,21 +166,47 @@ export async function startServer(): Promise<void> {
   });
   wss.on('connection', (ws: WebSocket, _req: IncomingMessage, cam: Camera) => {
     ws.binaryType = 'nodebuffer';
+    const stats = statsFor(cam);
     let sessionError: string | null = null;
     void cam.openTalk().catch((err: unknown) => {
       sessionError = err instanceof Error ? err.message : String(err);
+      stats.talkOpen = false;
+      stats.lastError = sessionError;
     });
+    // Accumulator: the uplink is 320-byte frames (40 ms of G.711 at 8 kHz), but
+    // a client may send any chunking. Buffer here so a misaligned client still
+    // produces valid frames rather than silence.
+    let pending: Buffer<ArrayBufferLike> = Buffer.alloc(0);
     ws.on('message', (data: Buffer) => {
+      stats.wsMessages += 1;
+      stats.wsBytes += data.length;
       if (sessionError) return;
-      // Each frame is one 320-byte G.711 chunk (40 ms at 8 kHz).
-      if (data.length < 320) return;
-      try {
-        cam.sendTalkAudio(data);
-      } catch {
-        /* the talk session closed under us; stop pushing audio */
+      pending = pending.length ? Buffer.concat([pending, data]) : data;
+      while (pending.length >= TALK_CHUNK_BYTES) {
+        const frame = pending.subarray(0, TALK_CHUNK_BYTES);
+        pending = pending.subarray(TALK_CHUNK_BYTES);
+        try {
+          cam.sendTalkAudio(frame);
+          stats.framesToCamera += 1;
+        } catch (err) {
+          stats.lastError = err instanceof Error ? err.message : String(err);
+        }
       }
     });
-    ws.on('close', () => void cam.closeTalk().catch(() => undefined));
+    cam.onMicrophone((frame) => {
+      stats.micFramesFromCamera += 1;
+      if (frame.codec !== 14) return; // G.711 A-law only
+      const pcm = Buffer.alloc(frame.data.length * 2);
+      for (let i = 0; i < frame.data.length; i += 1) {
+        pcm.writeInt16LE(alawToLinear(frame.data[i]!), i * 2);
+      }
+      const CAPTURE_LIMIT = 48000 * 2 * 30; // 30 s of 8 kHz mono
+      stats.capture = Buffer.concat([stats.capture, pcm]).subarray(-CAPTURE_LIMIT);
+    });
+    ws.on('close', () => {
+      stats.talkOpen = false;
+      void cam.closeTalk().catch(() => undefined);
+    });
   });
 
   await new Promise<void>((done) => server.listen(config.server.port, config.server.host, done));
@@ -379,17 +461,52 @@ async function handle(req: IncomingMessage, res: ServerResponse, api: JsonApi): 
     return;
   }
 
+  if (path === '/api/talk/capture' && req.method === 'GET') {
+    const cam = getCamera(api, req, res);
+    if (!cam) return;
+    const pcm = statsFor(cam).capture;
+    res.writeHead(200, {
+      'Content-Type': 'audio/l16',
+      'Content-Length': pcm.length,
+      'X-Sample-Rate': '8000',
+    });
+    res.end(pcm);
+    return;
+  }
+
+  if (path === '/api/talk/stats' && req.method === 'GET') {
+    const cam = getCamera(api, req, res);
+    if (!cam) return;
+    // `capture` is megabytes of PCM; report only its size. Serialising it here
+    // made every poll drag hundreds of kB and stalled the page.
+    const { capture, ...rest } = statsFor(cam);
+    json(res, 200, { ...rest, captureBytes: capture.length });
+    return;
+  }
+
   if (path === '/api/talk' && req.method === 'POST') {
     const cam = getCamera(api, req, res);
     if (!cam) return;
     const body = (await readBody(req)) as { phase?: string };
+    const stats = statsFor(cam);
     if (body.phase === 'start') {
-      await cam.openTalk();
+      try {
+        await cam.openTalk();
+        stats.talkOpen = true;
+        stats.lastError = null;
+      } catch (err) {
+        // Surface the real reason instead of pretending the intercom is open.
+        stats.talkOpen = false;
+        stats.lastError = err instanceof Error ? err.message : String(err);
+        json(res, 502, { error: stats.lastError });
+        return;
+      }
       json(res, 200, { ok: true, talking: true });
       return;
     }
     if (body.phase === 'stop') {
       await cam.closeTalk();
+      stats.talkOpen = false;
       json(res, 200, { ok: true, talking: false });
       return;
     }

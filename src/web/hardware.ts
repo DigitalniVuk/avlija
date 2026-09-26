@@ -46,6 +46,15 @@ let audioSource: MediaStreamAudioSourceNode | null = null;
 let workletReady: Promise<void> | null = null;
 let talkSocket: WebSocket | null = null;
 let talkNode: AudioWorkletNode | null = null;
+/**
+ * A zero-gain sink for the worklet's output.
+ *
+ * An AudioWorkletNode with no outgoing connection is not guaranteed to be
+ * pulled by the audio rendering thread, so `process()` may never run and no
+ * audio is ever encoded. Routing it through a muted gain node to the
+ * destination keeps the graph alive without making a sound.
+ */
+let talkSink: GainNode | null = null;
 
 /** G.711 A-law encoder in the browser, matching the camera's expected format. */
 function installAlawWorklet(ctx: AudioContext): Promise<void> {
@@ -53,14 +62,32 @@ function installAlawWorklet(ctx: AudioContext): Promise<void> {
   // loaded throws, which previously aborted the whole talk session.
   if (workletReady) return workletReady;
   const blob = `
+    // The camera's DVRIP talk channel wants 320-byte frames (40 ms of G.711 at
+    // 8 kHz), but an AudioWorklet process() call yields one 128-sample quantum.
+    // Posting each quantum directly produced 128-byte messages that the server
+    // discarded, so the microphone was captured and thrown away. Buffer to the
+    // protocol's frame size here instead.
+    const FRAME = 320;
     class AlawEncoder extends AudioWorkletProcessor {
+      constructor() {
+        super();
+        this.buffer = new Uint8Array(FRAME);
+        this.filled = 0;
+      }
       process(inputs) {
         const input = inputs[0];
-        if (!input || !input[0]) return true;
-        const ch = input[0];
-        const out = new Int8Array(ch.length);
-        for (let i = 0; i < ch.length; i++) out[i] = this.encode(ch[i]);
-        this.port.postMessage(out.buffer, [out.buffer]);
+        if (input && input[0]) {
+          const ch = input[0];
+          for (let i = 0; i < ch.length; i++) {
+            this.buffer[this.filled++] = this.encode(ch[i]);
+            if (this.filled === FRAME) {
+              // Copy out: the scratch buffer is reused on the next quantum.
+              const out = this.buffer.slice();
+              this.port.postMessage(out.buffer, [out.buffer]);
+              this.filled = 0;
+            }
+          }
+        }
         return true;
       }
       encode(sample) {
@@ -148,13 +175,15 @@ export function wireLights(register: (handler: (id: string) => void) => void): v
 
 // --------------------------------------------------------------- talk-back
 
-async function postTalk(phase: 'start' | 'stop'): Promise<void> {
-  if (!currentCameraId) return;
-  await fetch(`/api/talk?camera=${encodeURIComponent(currentCameraId)}`, {
+async function postTalk(phase: 'start' | 'stop'): Promise<boolean> {
+  if (!currentCameraId) return false;
+  const res = await fetch(`/api/talk?camera=${encodeURIComponent(currentCameraId)}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ phase }),
   });
+  if (!res.ok) return false;
+  return ((await res.json()) as { talking: boolean }).talking;
 }
 
 function setTalking(active: boolean): void {
@@ -164,8 +193,30 @@ function setTalking(active: boolean): void {
   talkStop.disabled = !active;
 }
 
+/**
+ * Last exit path through startTalking, published for diagnostics.
+ *
+ * Talk-back can fail in several ways that all look identical from the UI, so
+ * this records which branch was taken. Read it from the console or a test with
+ * `window.__avlijaTalk`.
+ */
+export const talkTrace: { lastExit: string; at: number } = { lastExit: 'not-called', at: 0 };
+function trace(step: string): void {
+  talkTrace.lastExit = step;
+  talkTrace.at = Date.now();
+  (window as unknown as { __avlijaTalk: unknown }).__avlijaTalk = { ...talkTrace };
+}
+
 async function startTalking(): Promise<void> {
-  if (talking || !currentCameraId) return;
+  trace('enter');
+  if (talking) {
+    trace('already-talking');
+    return;
+  }
+  if (!currentCameraId) {
+    trace('no-camera-id');
+    return;
+  }
   setTalkStatus('Requesting microphone…', 'busy');
   if (!window.isSecureContext) {
     setTalkStatus(
@@ -182,16 +233,26 @@ async function startTalking(): Promise<void> {
     mediaStream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true, noiseSuppression: true },
     });
-  } catch {
+    trace('mic-granted');
+  } catch (err) {
+    trace(`mic-denied: ${(err as Error).name}`);
     setTalkStatus('Microphone permission denied by the browser.', 'error');
     return;
   }
   try {
     audioContext = new AudioContext({ sampleRate: 8000 });
+    trace(`audio-context:${audioContext.state}`);
     await installAlawWorklet(audioContext);
+    trace('worklet-loaded');
     await audioContext.resume();
+    trace(`audio-resumed:${audioContext.state}`);
     audioSource = audioContext.createMediaStreamSource(mediaStream);
-    await postTalk('start');
+    const started = await postTalk('start');
+    if (!started) {
+      setTalkStatus('Camera refused the intercom — close iCSee and try again.', 'error');
+      await teardown();
+      return;
+    }
     talkSocket = await openTalkSocket(currentCameraId);
     talkNode = new AudioWorkletNode(audioContext, 'alaw-encoder');
     // The worklet emits raw G.711; ship it straight to the server. If the
@@ -202,11 +263,16 @@ async function startTalking(): Promise<void> {
       if (socket.bufferedAmount > MAX_BUFFERED_BYTES) return;
       socket.send(event.data);
     };
+    talkSink = audioContext.createGain();
+    talkSink.gain.value = 0;
     audioSource.connect(talkNode);
+    talkNode.connect(talkSink).connect(audioContext.destination);
     setTalking(true);
     talkStop.disabled = false;
+    trace('streaming');
     setTalkStatus('Intercom open — hold to speak.', 'idle');
   } catch (err) {
+    trace(`threw: ${(err as Error).message}`);
     setTalkStatus(`Could not start talk-back: ${(err as Error).message}`, 'error');
     await teardown();
   }
@@ -217,6 +283,8 @@ async function teardown(): Promise<void> {
   setTalkStatus('');
   talkNode?.disconnect();
   talkNode = null;
+  talkSink?.disconnect();
+  talkSink = null;
   audioSource?.disconnect();
   audioSource = null;
   talkSocket?.close();

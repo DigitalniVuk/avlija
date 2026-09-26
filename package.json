@@ -18,7 +18,8 @@
     "ptz:verify": "tsx tools/ptz-verify.ts",
     "test:e2e": "tsx tools/e2e.ts",
     "test": "npm run typecheck && npm run build && npm run test:e2e",
-    "hw:verify": "tsx tools/verify-hardware.ts"
+    "hw:verify": "tsx tools/verify-hardware.ts",
+    "verify:audio": "tsx tools/verify-audio-path.ts"
   },
   "dependencies": {
     "ws": "^8.18.0"
